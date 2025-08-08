@@ -1,10 +1,8 @@
-import base64
 import smtplib
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import List, Dict, Any, Optional
 import requests
-
 
 def build_digest_text(jobs: List[Dict[str, Any]], news: List[Dict[str, Any]]) -> str:
     lines = []
@@ -36,7 +34,6 @@ def build_digest_text(jobs: List[Dict[str, Any]], news: List[Dict[str, Any]]) ->
     else:
         lines.append("📰 News: No items today.")
     return "\n".join(lines)
-
 
 def build_digest_html(jobs: List[Dict[str, Any]], news: List[Dict[str, Any]]) -> str:
     def esc(s: Optional[str]) -> str:
@@ -79,6 +76,27 @@ def build_digest_html(jobs: List[Dict[str, Any]], news: List[Dict[str, Any]]) ->
     """
     return html
 
+def _chunk_text(text: str, limit: int = 1400) -> list[str]:
+    # Split on newlines to keep items intact; fall back to slicing if needed.
+    chunks, current = [], []
+    count = 0
+    for line in (text or "").splitlines():
+        if count + len(line) + 1 <= limit:
+            current.append(line)
+            count += len(line) + 1
+        else:
+            if current:
+                chunks.append("\n".join(current))
+            # If a single line is too big, hard-split it.
+            if len(line) > limit:
+                for i in range(0, len(line), limit):
+                    chunks.append(line[i:i+limit])
+                current, count = [], 0
+            else:
+                current, count = [line], len(line)
+    if current:
+        chunks.append("\n".join(current))
+    return chunks or ["(empty)"]
 
 def send_whatsapp_via_twilio(
     account_sid: Optional[str],
@@ -93,23 +111,24 @@ def send_whatsapp_via_twilio(
         return False
 
     url = f"https://api.twilio.com/2010-04-01/Accounts/{account_sid}/Messages.json"
-    data = {
-        "From": from_whatsapp,
-        "To": to_whatsapp,
-        "Body": body,
-    }
 
-    try:
-        resp = requests.post(url, data=data, auth=(account_sid, auth_token), timeout=20)
-        if resp.status_code >= 200 and resp.status_code < 300:
-            print("[notifier] WhatsApp sent via Twilio.")
-            return True
-        print(f"[notifier] Twilio error {resp.status_code}: {resp.text}")
-        return False
-    except Exception as e:
-        print(f"[notifier] Twilio request failed: {e}")
-        return False
+    # WhatsApp text practical size limit; chunk to be safe.
+    chunks = _chunk_text(body, limit=1400)
+    any_success = False
 
+    for idx, part in enumerate(chunks, start=1):
+        data = {"From": from_whatsapp, "To": to_whatsapp, "Body": part}
+        try:
+            resp = requests.post(url, data=data, auth=(account_sid, auth_token), timeout=20)
+            if 200 <= resp.status_code < 300:
+                print(f"[notifier] WhatsApp chunk {idx}/{len(chunks)} sent.")
+                any_success = True
+            else:
+                print(f"[notifier] Twilio error {resp.status_code} on chunk {idx}: {resp.text}")
+        except Exception as e:
+            print(f"[notifier] Twilio request failed on chunk {idx}: {e}")
+
+    return any_success
 
 def send_email_via_gmail(
     smtp_user: Optional[str],
